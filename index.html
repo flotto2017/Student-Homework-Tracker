@@ -53,6 +53,9 @@ const App = () => {
   const [inputScoreNote, setInputScoreNote] = useState('');
   const [editingScoreId, setEditingScoreId] = useState(null);
   
+  // เพิ่ม State ที่หายไป
+  const [bulkInput, setBulkInput] = useState('');
+  
   const [statusErr, setStatusErr] = useState('');
   const [statusOk, setStatusOk] = useState('');
   const [isWorking, setIsWorking] = useState(false);
@@ -122,6 +125,40 @@ const App = () => {
     setIsWorking(false);
   };
 
+  // เพิ่มฟังก์ชันนำเข้าข้อมูลชุดใหญ่ที่หายไป
+  const handleBulkImport = async () => {
+    if (!bulkInput.trim()) return;
+    setIsWorking(true);
+    setStatusOk('');
+    setStatusErr('');
+    try {
+      const rows = bulkInput.trim().split('\n');
+      let count = 0;
+      for (const row of rows) {
+        const cols = row.split('\t');
+        if (cols.length >= 2) {
+          const name = cols[0]?.trim();
+          const dob = cols[1]?.trim();
+          const startDate = cols[2]?.trim() || getLocalDateString();
+          if (name && dob) {
+            await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'students'), {
+              name, dob, startDate, createdAt: new Date().toISOString()
+            });
+            count++;
+          }
+        }
+      }
+      if (count > 0) {
+        setStatusOk(`นำเข้าสำเร็จ ${count} รายชื่อ`);
+        setBulkInput('');
+        setTimeout(() => setStatusOk(''), 5000);
+      } else {
+        setStatusErr("ไม่พบข้อมูลที่ถูกต้อง (ต้องแยกคอลัมน์ด้วย Tab)");
+      }
+    } catch (e) { setStatusErr("Import Error: " + e.message); }
+    setIsWorking(false);
+  };
+
   const handleSaveOrUpdateScore = async (e) => {
     e.preventDefault();
     if (!activeStudent || !inputScoreVal) return;
@@ -149,14 +186,14 @@ const App = () => {
   };
 
   // ============================================================
-  // ส่วนที่ 3: GAMIFICATION LOGIC (NEW)
+  // ส่วนที่ 3: GAMIFICATION LOGIC
   // ============================================================
   
   const studentScores = useMemo(() => {
     if (!activeStudent) return [];
     return scores
       .filter(s => s.studentId === activeStudent.id)
-      .sort((a, b) => new Date(b.date) - new Date(a.date)); // ล่าสุดขึ้นก่อน
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
   }, [scores, activeStudent]);
 
   const streakInfo = useMemo(() => {
@@ -167,26 +204,24 @@ const App = () => {
     let checkDate = new Date();
     checkDate.setHours(0, 0, 0, 0);
 
-    // ถ้าวันนี้เป็นเสาร์/อาทิตย์ ให้ถอยไปเช็คที่วันศุกร์ล่าสุด
+    // ข้ามเสาร์อาทิตย์
     if (checkDate.getDay() === 0) checkDate.setDate(checkDate.getDate() - 2);
     if (checkDate.getDay() === 6) checkDate.setDate(checkDate.getDate() - 1);
 
-    while (true) {
+    let safety = 0;
+    while (safety < 365) {
+      safety++;
       const dateStr = getLocalDateString(checkDate);
       if (submittedDates.has(dateStr)) {
         streak++;
-        // ถอยไป 1 วัน
         checkDate.setDate(checkDate.getDate() - 1);
-        // ถ้าถอยไปโดนวันอาทิตย์ ให้ถอยไปวันศุกร์ (ข้าม ส.-อา.)
         if (checkDate.getDay() === 0) checkDate.setDate(checkDate.getDate() - 2);
       } else {
-        // ถ้าวันนี้ยังไม่ได้ส่ง (และไม่ใช่ ส.-อา.) ให้ลองเช็คเมื่อวาน (กรณีเพิ่งเริ่มวันใหม่)
         if (streak === 0) {
            const yesterday = new Date(checkDate);
            yesterday.setDate(yesterday.getDate() - 1);
            if (yesterday.getDay() === 0) yesterday.setDate(yesterday.getDate() - 2);
-           const yestStr = getLocalDateString(yesterday);
-           if (submittedDates.has(yestStr)) {
+           if (submittedDates.has(getLocalDateString(yesterday))) {
              checkDate = yesterday;
              continue;
            }
@@ -202,28 +237,21 @@ const App = () => {
     const total = studentScores.length;
     const avg = total > 0 ? studentScores.reduce((acc, c) => acc + c.score, 0) / total : 0;
 
-    // 1. First Step
-    if (total >= 1) earned.push({ id: 'first', icon: <Medal className="text-amber-600"/>, title: 'ก้าวแรกสู่ชัยชนะ', desc: 'บันทึกคะแนนครั้งแรก' });
-    
-    // 2. Five-in-a-row
-    if (streakInfo >= 5) earned.push({ id: 'streak5', icon: <Medal className="text-slate-400"/>, title: 'นักสู้ 5 วันติด', desc: 'บันทึกครบ 1 สัปดาห์' });
-    
-    // 3. Consistency King
-    if (total >= 20) earned.push({ id: 'king', icon: <Medal className="text-amber-400"/>, title: 'เจ้าแห่งวินัย', desc: 'บันทึกสะสมครบ 20 วัน' });
+    if (total >= 1) earned.push({ id: 'first', title: 'ก้าวแรกสู่ชัยชนะ' });
+    if (streakInfo >= 5) earned.push({ id: 'streak5', title: 'นักสู้ 5 วันติด' });
+    if (total >= 20) earned.push({ id: 'king', title: 'เจ้าแห่งวินัย' });
 
-    // 4. High Flyer (3 ล่าสุด > เฉลี่ยรวม)
     if (total >= 3) {
       const last3 = studentScores.slice(0, 3);
       if (last3.every(s => s.score > avg)) {
-        earned.push({ id: 'flyer', icon: <Rocket className="text-indigo-500"/>, title: 'ดาวรุ่งพุ่งแรง', desc: 'คะแนนสูงกว่าค่าเฉลี่ย 3 ครั้งติด' });
+        earned.push({ id: 'flyer', title: 'ดาวรุ่งพุ่งแรง' });
       }
     }
 
-    // 5. Perfect Week (5 วันล่าสุดคะแนนเฉลี่ย > 8)
     if (total >= 5) {
       const last5 = studentScores.slice(0, 5);
       const last5Avg = last5.reduce((acc, c) => acc + c.score, 0) / 5;
-      if (last5Avg >= 8) earned.push({ id: 'perfect', icon: <Crown className="text-yellow-500"/>, title: 'สัปดาห์ไร้ที่ติ', desc: 'บันทึกครบและคะแนนเยี่ยม' });
+      if (last5Avg >= 8) earned.push({ id: 'perfect', title: 'สัปดาห์ไร้ที่ติ' });
     }
 
     return earned;
