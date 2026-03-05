@@ -25,7 +25,7 @@ const firebaseConfig = JSON.parse(__firebase_config);
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const currentAppId = typeof __app_id !== 'undefined' ? __app_id : 'homework-tracker-v1';
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'homework-tracker-v1';
 
 // Helper: จัดการวันที่แบบ Local
 const getLocalDateString = (date = new Date()) => {
@@ -52,6 +52,8 @@ const App = () => {
   const [inputScoreVal, setInputScoreVal] = useState('');
   const [inputScoreNote, setInputScoreNote] = useState('');
   const [editingScoreId, setEditingScoreId] = useState(null);
+  
+  // FIXED: เพิ่ม State ที่ขาดหายไปซึ่งทำให้เกิด ReferenceError
   const [bulkInput, setBulkInput] = useState('');
   
   const [statusErr, setStatusErr] = useState('');
@@ -79,10 +81,16 @@ const App = () => {
   // REAL-TIME DATA
   useEffect(() => {
     if (!user) return;
-    const stdRef = collection(db, 'artifacts', currentAppId, 'public', 'data', 'students');
-    const unsubS = onSnapshot(stdRef, (snap) => setStudents(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const scoreRef = collection(db, 'artifacts', currentAppId, 'public', 'data', 'scores');
-    const unsubSc = onSnapshot(scoreRef, (snap) => setScores(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const stdRef = collection(db, 'artifacts', appId, 'public', 'data', 'students');
+    const unsubS = onSnapshot(stdRef, (snap) => {
+      setStudents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => setStatusErr("Firestore Error: " + err.message));
+
+    const scoreRef = collection(db, 'artifacts', appId, 'public', 'data', 'scores');
+    const unsubSc = onSnapshot(scoreRef, (snap) => {
+      setScores(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => setStatusErr("Firestore Error: " + err.message));
+
     return () => { unsubS(); unsubSc(); };
   }, [user]);
 
@@ -109,7 +117,7 @@ const App = () => {
     if (!inputName || !inputDob) return;
     setIsWorking(true);
     try {
-      const col = collection(db, 'artifacts', currentAppId, 'public', 'data', 'students');
+      const col = collection(db, 'artifacts', appId, 'public', 'data', 'students');
       await addDoc(col, { 
         name: inputName.trim(), 
         dob: inputDob.trim(), 
@@ -117,12 +125,13 @@ const App = () => {
         createdAt: new Date().toISOString() 
       });
       setInputName(''); setInputDob('');
-      setStatusOk('บันทึกสำเร็จ');
+      setStatusOk('ลงทะเบียนสำเร็จ');
       setTimeout(() => setStatusOk(''), 3000);
     } catch (e) { setStatusErr(e.message); }
     setIsWorking(false);
   };
 
+  // FIXED: ฟังก์ชันนำเข้าข้อมูล Excel ที่หายไป
   const handleBulkImport = async () => {
     if (!bulkInput.trim()) return;
     setIsWorking(true);
@@ -138,7 +147,7 @@ const App = () => {
           const dob = cols[1]?.trim();
           const startDate = cols[2]?.trim() || getLocalDateString();
           if (name && dob) {
-            await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'students'), {
+            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'students'), {
               name, dob, startDate, createdAt: new Date().toISOString()
             });
             count++;
@@ -150,7 +159,7 @@ const App = () => {
         setBulkInput('');
         setTimeout(() => setStatusOk(''), 5000);
       } else {
-        setStatusErr("ไม่พบข้อมูลที่ถูกต้อง (ต้องแยกคอลัมน์ด้วย Tab)");
+        setStatusErr("รูปแบบข้อมูลไม่ถูกต้อง");
       }
     } catch (e) { setStatusErr("Import Error: " + e.message); }
     setIsWorking(false);
@@ -169,11 +178,11 @@ const App = () => {
         updatedAt: new Date().toISOString()
       };
       if (editingScoreId) {
-        await updateDoc(doc(db, 'artifacts', currentAppId, 'public', 'data', 'scores', editingScoreId), scoreData);
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'scores', editingScoreId), scoreData);
         setStatusOk('อัปเดตข้อมูลแล้ว');
       } else {
         scoreData.timestamp = new Date().toISOString();
-        await addDoc(collection(db, 'artifacts', currentAppId, 'public', 'data', 'scores'), scoreData);
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'scores'), scoreData);
         setStatusOk('บันทึกคะแนนสำเร็จ');
       }
       setEditingScoreId(null); setInputScoreVal(''); setInputScoreNote('');
@@ -183,7 +192,7 @@ const App = () => {
   };
 
   // ============================================================
-  // ส่วนที่ 3: GAMIFICATION LOGIC
+  // ส่วนที่ 3: GAMIFICATION & LOGIC
   // ============================================================
   
   const studentScores = useMemo(() => {
@@ -193,27 +202,30 @@ const App = () => {
       .sort((a, b) => new Date(b.date) - new Date(a.date));
   }, [scores, activeStudent]);
 
+  // FIXED: ปรับปรุง Logic การเช็คงานค้าง ไม่ให้นับ "วันนี้" (เพราะยังไม่หมดวัน)
   const missingSubmissions = useMemo(() => {
     if (!activeStudent) return [];
     const missing = [];
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    
+    // ตั้งค่าวันสิ้นสุดเป็น "เมื่อวานนี้"
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 0, 0, 0);
 
     const parts = activeStudent.startDate ? activeStudent.startDate.split('-') : [];
     const startLimit = parts.length === 3 
         ? new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]))
-        : new Date(today.getTime() - (14 * 24 * 60 * 60 * 1000));
+        : new Date(yesterday.getTime() - (14 * 24 * 60 * 60 * 1000));
     
     startLimit.setHours(0, 0, 0, 0);
 
-    let checkDate = new Date(today);
+    let checkDate = new Date(yesterday);
     while (checkDate >= startLimit) {
         const dayOfWeek = checkDate.getDay();
         const dateStr = getLocalDateString(checkDate);
         const isWorkDay = (dayOfWeek !== 0 && dayOfWeek !== 6);
         
         if (isWorkDay) {
-            // แก้ไข: เช็คจาก studentScores ของเด็กคนนี้เท่านั้น
             const hasSubmitted = studentScores.some(s => s.date === dateStr);
             if (!hasSubmitted) {
                 missing.push({
@@ -230,7 +242,6 @@ const App = () => {
 
   const streakInfo = useMemo(() => {
     if (studentScores.length === 0) return 0;
-    
     const submittedDates = new Set(studentScores.map(s => s.date));
     let streak = 0;
     let checkDate = new Date();
@@ -288,7 +299,6 @@ const App = () => {
     return earned;
   }, [studentScores, streakInfo]);
 
-  // -- กราฟและสถิติ --
   const chartData = useMemo(() => {
     return [...studentScores].reverse().map(s => ({
       d: new Date(s.date).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }),
@@ -362,14 +372,22 @@ const App = () => {
           <main className="max-w-6xl mx-auto p-4 md:p-8 space-y-6">
 
             {/* แจ้งเตือนงานค้าง */}
-            {missingSubmissions.length > 0 && (
+            {missingSubmissions.length > 0 ? (
                 <div className="bg-rose-50 border border-rose-100 p-6 rounded-[2rem] flex flex-col md:flex-row items-center gap-4 shadow-sm animate-pulse-slow">
-                    <div className="bg-rose-100 p-3 rounded-2xl text-rose-600"><Award size={32} /></div>
+                    <div className="bg-rose-100 p-3 rounded-2xl text-rose-600"><Calendar size={32} /></div>
                     <div>
                         <h3 className="text-rose-900 font-black text-lg uppercase tracking-tight">ตรวจพบงานค้างส่ง {missingSubmissions.length} รายการ</h3>
                         <p className="text-rose-600 text-sm font-bold opacity-80">วันที่ขาด (จ.-ศ.): {missingSubmissions.map(m => m.label).join(', ')}</p>
                     </div>
                 </div>
+            ) : (
+              <div className="bg-emerald-50 border border-emerald-100 p-6 rounded-[2rem] flex items-center gap-4 shadow-sm">
+                  <div className="bg-emerald-100 p-3 rounded-2xl text-emerald-600"><CheckCircle2 size={32} /></div>
+                  <div>
+                      <h3 className="text-emerald-900 font-black text-lg uppercase tracking-tight">ยอดเยี่ยม! ส่งงานครบถ้วนแล้ว</h3>
+                      <p className="text-emerald-600 text-sm font-bold opacity-80">คุณบันทึกคะแนนครบทุกวันตั้งแต่เริ่มบันทึก ({activeStudent?.startDate})</p>
+                  </div>
+              </div>
             )}
             
             {/* 1. Badge & Mission Section */}
@@ -429,7 +447,7 @@ const App = () => {
               <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100"><p className="text-[10px] font-black text-slate-400 uppercase mb-2">เฉลี่ยรวม</p><span className={`text-4xl font-black text-${SETTINGS.themeColor}-600`}>{statsValues.a}</span></div>
               <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100"><p className="text-[10px] font-black text-slate-400 uppercase mb-2">ความขยัน</p><span className="text-4xl font-black text-slate-800">{statsValues.t} <small className="text-xs text-slate-300">ครั้ง</small></span></div>
               <div className={`bg-${SETTINGS.themeColor}-600 p-6 rounded-[2rem] text-white col-span-2 lg:col-span-1 flex justify-between items-center shadow-xl`}>
-                <div><p className="text-[10px] font-black opacity-60 uppercase mb-2">คะแนนสูงสุด</p><span className="text-4xl font-black">{statsValues.m}</span></div>
+                <div><p className="text-[10px] font-black opacity-60 uppercase mb-2">สูงสุด</p><span className="text-4xl font-black">{statsValues.m}</span></div>
                 <TrendingUp size={40} className="opacity-30"/>
               </div>
             </div>
@@ -447,7 +465,7 @@ const App = () => {
                       <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4f46e5" stopOpacity={0.2}/><stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/></linearGradient></defs>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                       <XAxis dataKey="d" axisLine={false} tickLine={false} tick={{fontSize:11, fontWeight:800, fill:'#94a3b8'}} />
-                      <YAxis domain={[0, 10]} axisLine={false} tickLine={false} tick={{fontSize:10, fill:'#cbd5e1'}} />
+                      <YAxis domain={[0, 200]} axisLine={false} tickLine={false} tick={{fontSize:10, fill:'#cbd5e1'}} />
                       <Tooltip contentStyle={{borderRadius:'1.5rem', border:'none', boxShadow:'0 20px 25px -5px rgb(0 0 0 / 0.1)'}} />
                       <Area type="monotone" dataKey="v" stroke="#4f46e5" strokeWidth={5} fill="url(#g)" />
                     </AreaChart>
@@ -459,7 +477,7 @@ const App = () => {
             {/* 4. Action & History Section */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
               <div className="lg:col-span-2 bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
-                <h2 className="font-black text-lg mb-6 flex items-center gap-2">
+                <h2 className="font-black text-lg mb-6 flex items-center gap-2 text-slate-800">
                   <Calendar size={20} className={`text-${SETTINGS.themeColor}-600`}/> 
                   {editingScoreId ? "แก้ไขข้อมูล" : "จดคะแนนวันนี้"}
                 </h2>
@@ -483,7 +501,7 @@ const App = () => {
               </div>
 
               <div className="lg:col-span-3 bg-white rounded-[2.5rem] shadow-sm border border-slate-100 flex flex-col h-[500px]">
-                <div className="p-8 border-b border-slate-50 font-black flex justify-between items-center">
+                <div className="p-8 border-b border-slate-50 font-black flex justify-between items-center text-slate-800">
                   <span>ประวัติคะแนน</span>
                   <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">History</span>
                 </div>
@@ -492,14 +510,14 @@ const App = () => {
                     <div key={s.id} className="m-2 p-4 flex justify-between items-center border border-transparent hover:border-slate-100 hover:bg-slate-50 rounded-2xl group transition-all">
                       <div className="flex gap-4 items-center">
                         <div className="w-12 h-12 bg-white shadow-sm rounded-xl flex flex-col items-center justify-center border border-slate-100">
-                          <span className="text-lg font-black leading-none">{new Date(s.date).getDate()}</span>
+                          <span className="text-lg font-black leading-none text-slate-700">{new Date(s.date).getDate()}</span>
                           <span className={`text-[8px] font-bold text-${SETTINGS.themeColor}-600 uppercase`}>{new Date(s.date).toLocaleDateString('th-TH', {month:'short'})}</span>
                         </div>
                         <div>
-                          <p className="font-bold text-slate-700 text-sm line-clamp-1">{s.note || 'บันทึกคะแนน'}</p>
+                          <p className="font-bold text-slate-700 text-sm line-clamp-1">{s.note || 'ไม่มีหมายเหตุ'}</p>
                           <div className="flex gap-4 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button onClick={() => { setEditingScoreId(s.id); setInputScoreDate(s.date); setInputScoreVal(s.score); setInputScoreNote(s.note || ''); window.scrollTo({top:0, behavior:'smooth'}); }} className="text-indigo-500 text-[10px] font-bold flex items-center gap-1 hover:underline"><Edit2 size={10}/> แก้ไข</button>
-                            <button onClick={async () => { if(window.confirm('ลบคะแนนนี้?')) await deleteDoc(doc(db,'artifacts',currentAppId,'public','data','scores',s.id)); }} className="text-rose-400 text-[10px] font-bold flex items-center gap-1 hover:underline"><Trash2 size={10}/> ลบ</button>
+                            <button onClick={async () => { if(window.confirm('ลบคะแนนนี้?')) await deleteDoc(doc(db,'artifacts',appId,'public','data','scores',s.id)); }} className="text-rose-400 text-[10px] font-bold flex items-center gap-1 hover:underline"><Trash2 size={10}/> ลบ</button>
                           </div>
                         </div>
                       </div>
@@ -521,20 +539,23 @@ const App = () => {
         <div className="min-h-screen">
           <nav className="bg-white px-6 py-4 flex justify-between items-center shadow-sm sticky top-0 z-50">
             <div className={`flex items-center gap-2 text-${SETTINGS.themeColor}-600`}>
-              <Settings size={24} /> <span className="font-black text-lg">โหมดคุณครู</span>
+              <Settings size={24} /> <span className="font-black text-lg text-slate-800">โหมดคุณครู</span>
             </div>
-            <button onClick={() => setView('login')} className="text-slate-400 font-bold text-sm flex items-center gap-1"><LogOut size={18} /> ออก</button>
+            <button onClick={() => setView('login')} className="text-slate-400 font-bold text-sm flex items-center gap-1 hover:text-rose-500"><LogOut size={18} /> ออก</button>
           </nav>
           <main className="max-w-6xl mx-auto p-4 md:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6">
             <div className="lg:col-span-4 space-y-6">
-              <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-slate-100 flex flex-col items-center">
-                <div className="w-full flex items-center gap-2 mb-6">
-                    <div className="p-2 bg-amber-50 rounded-xl"><Star className="text-amber-400 fill-current" size={24} /></div>
+              {/* FIXED: แก้ไขไอคอนลงทะเบียนรายคนให้แสดงผลเต็มรูป */}
+              <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100 flex flex-col items-center">
+                <div className="w-full flex items-center gap-3 mb-6 bg-slate-50 p-3 rounded-2xl">
+                    <div className="flex-shrink-0 p-2 bg-amber-100 rounded-xl">
+                      <Star className="text-amber-500 fill-current" size={24} />
+                    </div>
                     <h3 className="font-black text-slate-800 text-lg">ลงทะเบียนรายคน</h3>
                 </div>
                 <form onSubmit={saveNewStudent} className="w-full space-y-4">
                   <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">ชื่อเล่นนักเรียน</label><input className="w-full p-4 bg-slate-50 rounded-xl outline-none border border-transparent focus:border-indigo-500 font-bold text-sm" placeholder="เช่น น้องเอ" value={inputName} onChange={(e)=>setInputName(e.target.value)} /></div>
-                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">รหัสผ่าน (วันเกิด)</label><input className="w-full p-4 bg-slate-50 rounded-xl outline-none border border-transparent focus:border-indigo-500 font-bold text-sm" placeholder="010110" value={inputDob} onChange={(e)=>setInputDob(e.target.value)} /></div>
+                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">รหัสผ่าน (วันเกิด)</label><input className="w-full p-4 bg-slate-50 rounded-xl outline-none border border-transparent focus:border-indigo-500 font-bold text-sm" placeholder="เช่น 010155" value={inputDob} onChange={(e)=>setInputDob(e.target.value)} /></div>
                   <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">วันที่เริ่มบันทึก</label><input type="date" className="w-full p-4 bg-slate-50 rounded-xl outline-none border border-transparent focus:border-indigo-500 font-bold text-sm" value={inputStartDate} onChange={(e)=>setInputStartDate(e.target.value)} /></div>
                   {statusOk && <p className="text-emerald-500 text-[10px] font-bold bg-emerald-50 p-2 rounded-lg">{statusOk}</p>}
                   <button disabled={isWorking || !isReady} className="w-full bg-slate-900 text-white py-4 rounded-xl font-black text-sm active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50">
@@ -550,7 +571,7 @@ const App = () => {
               </div>
             </div>
             <div className="lg:col-span-8 bg-white rounded-[2.5rem] shadow-sm border border-slate-100 overflow-hidden">
-              <div className="p-6 border-b border-slate-50 font-black flex justify-between items-center bg-slate-50/30">
+              <div className="p-6 border-b border-slate-50 font-black flex justify-between items-center bg-slate-50/30 text-slate-800">
                 <span>รายชื่อนักเรียน ({students.length})</span>
                 <span className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Start Date</span>
               </div>
@@ -558,12 +579,12 @@ const App = () => {
                 {students.sort((a,b)=>a.name.localeCompare(b.name)).map(s => (
                   <div key={s.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
                     <div className="flex items-center gap-3">
-                      <div className={`w-10 h-10 bg-${SETTINGS.themeColor}-50 rounded-xl flex items-center justify-center text-${SETTINGS.themeColor}-600 font-black shadow-sm`}>{s.name.charAt(0)}</div>
+                      <div className={`w-10 h-10 bg-${SETTINGS.themeColor}-50 rounded-xl flex items-center justify-center text-${SETTINGS.themeColor}-600 font-black shadow-sm uppercase`}>{s.name.charAt(0)}</div>
                       <div><p className="font-bold text-sm text-slate-700">{s.name}</p><p className="text-[10px] text-slate-400">Pass: {s.dob}</p></div>
                     </div>
                     <div className="flex items-center gap-4">
                       <span className="text-[10px] font-black text-indigo-400 bg-indigo-50 px-2 py-1 rounded-lg">{s.startDate || '-'}</span>
-                      <button onClick={()=>{ if(window.confirm(`ลบ ${s.name}?`)) deleteDoc(doc(db,'artifacts',currentAppId,'public','data','students',s.id)); }} className="p-2 text-slate-200 hover:text-rose-500 transition-colors"><Trash2 size={18}/></button>
+                      <button onClick={()=>{ if(window.confirm(`ลบ ${s.name}?`)) deleteDoc(doc(db,'artifacts',appId,'public','data','students',s.id)); }} className="p-2 text-slate-200 hover:text-rose-500 transition-colors"><Trash2 size={18}/></button>
                     </div>
                   </div>
                 ))}
