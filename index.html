@@ -1,601 +1,708 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, onSnapshot, addDoc, deleteDoc, updateDoc, query, where } from 'firebase/firestore';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
-import { 
-  User, Lock, Plus, Trash2, Settings, LogOut, 
-  TrendingUp, Award, Calendar, CheckCircle2, 
-  Database, Loader2, Edit2, X, Flame, 
-  Medal, Rocket, Crown, Target, Star
-} from 'lucide-react';
-
-/* ============================================================
-  ส่วนที่ 1: ตั้งค่าระบบ
-  ============================================================
-*/
-
-const SETTINGS = {
-  adminUser: "admin",
-  adminPass: "1234",
-  themeColor: "indigo"
-};
-
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'homework-tracker-v1';
-
-// Helper: จัดการวันที่แบบ Local
-const getLocalDateString = (date = new Date()) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-};
-
-const App = () => {
-  const [user, setUser] = useState(null);
-  const [isReady, setIsReady] = useState(false);
-  const [view, setView] = useState('login'); 
-  const [activeStudent, setActiveStudent] = useState(null);
-  
-  const [students, setStudents] = useState([]);
-  const [scores, setScores] = useState([]);
-  
-  const [formLogin, setFormLogin] = useState({ u: '', p: '' });
-  const [inputName, setInputName] = useState('');
-  const [inputDob, setInputDob] = useState('');
-  const [inputStartDate, setInputStartDate] = useState(getLocalDateString());
-  const [inputScoreDate, setInputScoreDate] = useState(getLocalDateString());
-  const [inputScoreVal, setInputScoreVal] = useState('');
-  const [inputScoreNote, setInputScoreNote] = useState('');
-  const [editingScoreId, setEditingScoreId] = useState(null);
-  
-  // FIXED: เพิ่ม State ที่ขาดหายไปซึ่งทำให้เกิด ReferenceError
-  const [bulkInput, setBulkInput] = useState('');
-  
-  const [statusErr, setStatusErr] = useState('');
-  const [statusOk, setStatusOk] = useState('');
-  const [isWorking, setIsWorking] = useState(false);
-
-  // AUTH & INITIALIZATION
-  useEffect(() => {
-    const startAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) { setStatusErr("Auth Error: " + err.message); }
-    };
-    startAuth();
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (u) setIsReady(true);
-    });
-  }, []);
-
-  // REAL-TIME DATA
-  useEffect(() => {
-    if (!user) return;
-    const stdRef = collection(db, 'artifacts', appId, 'public', 'data', 'students');
-    const unsubS = onSnapshot(stdRef, (snap) => {
-      setStudents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    }, (err) => setStatusErr("Firestore Error: " + err.message));
-
-    const scoreRef = collection(db, 'artifacts', appId, 'public', 'data', 'scores');
-    const unsubSc = onSnapshot(scoreRef, (snap) => {
-      setScores(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    }, (err) => setStatusErr("Firestore Error: " + err.message));
-
-    return () => { unsubS(); unsubSc(); };
-  }, [user]);
-
-  // LOGIN LOGIC
-  const doLogin = (e) => {
-    e.preventDefault();
-    setStatusErr('');
-    const { u, p } = formLogin;
-    if (u.toLowerCase() === SETTINGS.adminUser && p === SETTINGS.adminPass) {
-      setView('admin');
-      return;
-    }
-    const s = students.find(item => item.name.toLowerCase() === u.toLowerCase() && item.dob === p);
-    if (s) {
-      setActiveStudent(s);
-      setView('parent');
-    } else {
-      setStatusErr('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
-    }
-  };
-
-  const saveNewStudent = async (e) => {
-    e.preventDefault();
-    if (!inputName || !inputDob) return;
-    setIsWorking(true);
-    try {
-      const col = collection(db, 'artifacts', appId, 'public', 'data', 'students');
-      await addDoc(col, { 
-        name: inputName.trim(), 
-        dob: inputDob.trim(), 
-        startDate: inputStartDate,
-        createdAt: new Date().toISOString() 
-      });
-      setInputName(''); setInputDob('');
-      setStatusOk('ลงทะเบียนสำเร็จ');
-      setTimeout(() => setStatusOk(''), 3000);
-    } catch (e) { setStatusErr(e.message); }
-    setIsWorking(false);
-  };
-
-  // FIXED: ฟังก์ชันนำเข้าข้อมูล Excel ที่หายไป
-  const handleBulkImport = async () => {
-    if (!bulkInput.trim()) return;
-    setIsWorking(true);
-    setStatusOk('');
-    setStatusErr('');
-    try {
-      const rows = bulkInput.trim().split('\n');
-      let count = 0;
-      for (const row of rows) {
-        const cols = row.split('\t');
-        if (cols.length >= 2) {
-          const name = cols[0]?.trim();
-          const dob = cols[1]?.trim();
-          const startDate = cols[2]?.trim() || getLocalDateString();
-          if (name && dob) {
-            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'students'), {
-              name, dob, startDate, createdAt: new Date().toISOString()
-            });
-            count++;
-          }
-        }
-      }
-      if (count > 0) {
-        setStatusOk(`นำเข้าสำเร็จ ${count} รายชื่อ`);
-        setBulkInput('');
-        setTimeout(() => setStatusOk(''), 5000);
-      } else {
-        setStatusErr("รูปแบบข้อมูลไม่ถูกต้อง");
-      }
-    } catch (e) { setStatusErr("Import Error: " + e.message); }
-    setIsWorking(false);
-  };
-
-  const handleSaveOrUpdateScore = async (e) => {
-    e.preventDefault();
-    if (!activeStudent || !inputScoreVal) return;
-    setIsWorking(true);
-    try {
-      const scoreData = {
-        studentId: activeStudent.id,
-        date: inputScoreDate,
-        score: parseFloat(inputScoreVal),
-        note: inputScoreNote,
-        updatedAt: new Date().toISOString()
-      };
-      if (editingScoreId) {
-        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'scores', editingScoreId), scoreData);
-        setStatusOk('อัปเดตข้อมูลแล้ว');
-      } else {
-        scoreData.timestamp = new Date().toISOString();
-        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'scores'), scoreData);
-        setStatusOk('บันทึกคะแนนสำเร็จ');
-      }
-      setEditingScoreId(null); setInputScoreVal(''); setInputScoreNote('');
-      setTimeout(() => setStatusOk(''), 3000);
-    } catch (e) { setStatusErr(e.message); }
-    setIsWorking(false);
-  };
-
-  // ============================================================
-  // ส่วนที่ 3: GAMIFICATION & LOGIC
-  // ============================================================
-  
-  const studentScores = useMemo(() => {
-    if (!activeStudent) return [];
-    return scores
-      .filter(s => s.studentId === activeStudent.id)
-      .sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [scores, activeStudent]);
-
-  // FIXED: ปรับปรุง Logic การเช็คงานค้าง ไม่ให้นับ "วันนี้" (เพราะยังไม่หมดวัน)
-  const missingSubmissions = useMemo(() => {
-    if (!activeStudent) return [];
-    const missing = [];
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Homework Tracker</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & Libraries -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+    <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Firebase SDK (Compatibility Mode) -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
     
-    // ตั้งค่าวันสิ้นสุดเป็น "เมื่อวานนี้"
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    yesterday.setHours(0, 0, 0, 0);
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;800&display=swap');
+        body {
+            font-family: 'Sarabun', sans-serif;
+        }
+        .recharts-responsive-container {
+            min-height: 250px;
+        }
+        .animate-pulse-slow {
+            animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-slate-900">
+    <div id="root"></div>
 
-    const parts = activeStudent.startDate ? activeStudent.startDate.split('-') : [];
-    const startLimit = parts.length === 3 
-        ? new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]))
-        : new Date(yesterday.getTime() - (14 * 24 * 60 * 60 * 1000));
-    
-    startLimit.setHours(0, 0, 0, 0);
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+        const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = Recharts;
 
-    let checkDate = new Date(yesterday);
-    while (checkDate >= startLimit) {
-        const dayOfWeek = checkDate.getDay();
-        const dateStr = getLocalDateString(checkDate);
-        const isWorkDay = (dayOfWeek !== 0 && dayOfWeek !== 6);
+        // --- Global Variables & Config ---
+        const currentAppId = typeof __app_id !== 'undefined' ? __app_id : 'student-homework-tracker-b86de';
         
-        if (isWorkDay) {
-            const hasSubmitted = studentScores.some(s => s.date === dateStr);
-            if (!hasSubmitted) {
-                missing.push({
-                    dateStr,
-                    label: checkDate.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', weekday: 'short' })
-                });
+        // ข้อมูล Firebase ที่อัปเดตตามที่คุณส่งมาล่าสุด (ตรวจสอบตัวสะกดอย่างละเอียด)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : {
+                apiKey: "AIzaSyDdNnQA-pkFWGTLlUxM4s1HkKhmQ2zqDNA",
+                authDomain: "student-homework-tracker-b86de.firebaseapp.com",
+                projectId: "student-homework-tracker-b86de",
+                storageBucket: "student-homework-tracker-b86de.firebasestorage.app",
+                messagingSenderId: "878355896505",
+                appId: "1:878355896505:web:1acc4d24af5d57db766368",
+                measurementId: "G-D178FEY7BG"
+            };
+        
+        // Initialize Firebase
+        try {
+            if (!firebase.apps.length) {
+                firebase.initializeApp(firebaseConfig);
             }
+        } catch (e) {
+            console.error("Firebase Initialization Error:", e);
         }
-        checkDate.setDate(checkDate.getDate() - 1);
-        if (missing.length > 30) break; 
-    }
-    return missing;
-  }, [studentScores, activeStudent]);
 
-  const streakInfo = useMemo(() => {
-    if (studentScores.length === 0) return 0;
-    const submittedDates = new Set(studentScores.map(s => s.date));
-    let streak = 0;
-    let checkDate = new Date();
-    checkDate.setHours(0, 0, 0, 0);
+        // --- Utility Functions ---
+        const getLocalDateString = (date = new Date()) => {
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        };
 
-    if (checkDate.getDay() === 0) checkDate.setDate(checkDate.getDate() - 2);
-    if (checkDate.getDay() === 6) checkDate.setDate(checkDate.getDate() - 1);
+        // --- Icons Component ---
+        const Icon = ({ name, size = 20, className = "" }) => {
+            const icons = {
+                user: <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />,
+                lock: <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />,
+                plus: <path d="M5 12h14M12 5v14" />,
+                trash: <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />,
+                settings: <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />,
+                logout: <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />,
+                award: <path d="m15.477 12.89 1.515 8.526a.5.5 0 0 1-.81.47l-3.58-2.687a1 1 0 0 0-1.197 0l-3.586 2.686a.5.5 0 0 1-.81-.469l1.514-8.526" />,
+                calendar: <rect width="18" height="18" x="3" y="4" rx="2" ry="2" />,
+                trending: <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />,
+                dashboard: (
+                    <React.Fragment>
+                        <rect width="7" height="9" x="3" y="3" rx="1" />
+                        <rect width="7" height="5" x="14" y="3" rx="1" />
+                        <rect width="7" height="9" x="14" y="12" rx="1" />
+                        <rect width="7" height="5" x="3" y="16" rx="1" />
+                    </React.Fragment>
+                ),
+                chevronRight: <path d="m9 18 6-6-6-6" />,
+                flame: <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z" />,
+                medal: <React.Fragment><circle cx="12" cy="8" r="6"/><path d="M15.477 12.89 17 22l-5-3-5 3 1.523-9.11"/></React.Fragment>,
+                rocket: <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09zM12 15l-3-3m3 3 2 2m-2-2-1-1m1 1 1 1M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z" />,
+                crown: <path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7z" />,
+                target: <React.Fragment><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></React.Fragment>,
+                star: <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />,
+                clipboard: <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2M9 2h6" />,
+                checkCircle: (
+                    <React.Fragment>
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                        <polyline points="22 4 12 14.01 9 11.01" />
+                    </React.Fragment>
+                )
+            };
+            return (
+                <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} style={{ display: 'inline-block', verticalAlign: 'middle' }}>
+                    {icons[name] || <circle cx="12" cy="12" r="10" />}
+                </svg>
+            );
+        };
 
-    let safety = 0;
-    while (safety < 365) {
-      safety++;
-      const dateStr = getLocalDateString(checkDate);
-      if (submittedDates.has(dateStr)) {
-        streak++;
-        checkDate.setDate(checkDate.getDate() - 1);
-        if (checkDate.getDay() === 0) checkDate.setDate(checkDate.getDate() - 2);
-      } else {
-        if (streak === 0) {
-           const yesterday = new Date(checkDate);
-           yesterday.setDate(yesterday.getDate() - 1);
-           if (yesterday.getDay() === 0) yesterday.setDate(yesterday.getDate() - 2);
-           if (submittedDates.has(getLocalDateString(yesterday))) {
-             checkDate = yesterday;
-             continue;
-           }
-        }
-        break;
-      }
-    }
-    return streak;
-  }, [studentScores]);
-
-  const badges = useMemo(() => {
-    const earned = [];
-    const total = studentScores.length;
-    const avgValue = total > 0 ? studentScores.reduce((acc, c) => acc + c.score, 0) / total : 0;
-
-    if (total >= 1) earned.push({ id: 'first', title: 'ก้าวแรกสู่ชัยชนะ' });
-    if (streakInfo >= 5) earned.push({ id: 'streak5', title: 'นักสู้ 5 วันติด' });
-    if (total >= 20) earned.push({ id: 'king', title: 'เจ้าแห่งวินัย' });
-
-    if (total >= 3) {
-      const last3 = studentScores.slice(0, 3);
-      if (last3.every(s => s.score > avgValue)) {
-        earned.push({ id: 'flyer', title: 'ดาวรุ่งพุ่งแรง' });
-      }
-    }
-
-    if (total >= 5) {
-      const last5 = studentScores.slice(0, 5);
-      const last5Avg = last5.reduce((acc, c) => acc + c.score, 0) / 5;
-      if (last5Avg >= 8) earned.push({ id: 'perfect', title: 'สัปดาห์ไร้ที่ติ' });
-    }
-
-    return earned;
-  }, [studentScores, streakInfo]);
-
-  const chartData = useMemo(() => {
-    return [...studentScores].reverse().map(s => ({
-      d: new Date(s.date).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }),
-      v: s.score
-    }));
-  }, [studentScores]);
-
-  const statsValues = useMemo(() => {
-    if (!studentScores.length) return { a: "0.0", t: 0, m: 0 };
-    return {
-      a: (studentScores.reduce((acc, c) => acc + c.score, 0) / studentScores.length).toFixed(1),
-      t: studentScores.length,
-      m: Math.max(...studentScores.map(s => s.score))
-    };
-  }, [studentScores]);
-
-  return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      
-      {/* VIEW: LOGIN */}
-      {view === 'login' && (
-        <div className="min-h-screen flex flex-col items-center justify-center p-4">
-          <div className="w-full max-w-md bg-white rounded-[2.5rem] shadow-2xl p-10 border border-white relative z-10">
-            <div className="text-center mb-8">
-              <div className={`bg-${SETTINGS.themeColor}-600 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-4 shadow-xl text-white`}>
-                <Award size={40} />
-              </div>
-              <h1 className="text-2xl font-black">Homework Tracker</h1>
-              <p className="text-slate-400 text-xs font-bold mt-1 uppercase tracking-widest">ยินดีต้อนรับน้องๆ ทุกคน</p>
-            </div>
-            <form onSubmit={doLogin} className="space-y-4">
-              <div className="relative">
-                <User className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
-                <input type="text" className="w-full pl-12 pr-4 py-4 bg-slate-50 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 font-bold" placeholder="ชื่อเล่น" value={formLogin.u} onChange={(e)=>setFormLogin({...formLogin, u: e.target.value})} />
-              </div>
-              <div className="relative">
-                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
-                <input type="password" className="w-full pl-12 pr-4 py-4 bg-slate-50 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 font-bold" placeholder="รหัสผ่าน" value={formLogin.p} onChange={(e)=>setFormLogin({...formLogin, p: e.target.value})} />
-              </div>
-              {statusErr && <p className="text-rose-500 text-xs font-bold px-2">{statusErr}</p>}
-              <button disabled={!isReady} className={`w-full bg-${SETTINGS.themeColor}-600 text-white py-5 rounded-2xl font-black shadow-lg active:scale-95 transition-all disabled:opacity-50`}>
-                {isReady ? "เข้าสู่ระบบ" : "กำลังโหลด..."}
-              </button>
-            </form>
-          </div>
-          <div className="mt-8 text-slate-400 text-sm font-bold text-center">
-            <p>สร้างโดย KF</p>
-            <p className="text-[10px] opacity-60 tracking-widest">Line ID: prawitf</p>
-          </div>
-        </div>
-      )}
-
-      {/* VIEW: PARENT / STUDENT */}
-      {view === 'parent' && (
-        <div className="min-h-screen">
-          <nav className="bg-white px-6 py-4 flex justify-between items-center shadow-sm sticky top-0 z-50">
-            <div className="flex items-center gap-3 font-black">
-              <div className={`bg-${SETTINGS.themeColor}-600 w-10 h-10 rounded-xl flex items-center justify-center text-white shadow-lg`}><Award size={20}/></div>
-              <div>
-                <span className="text-slate-800 text-lg block leading-none">{activeStudent?.name}</span>
-                {streakInfo > 0 && (
-                  <span className="text-orange-500 text-[10px] font-black flex items-center gap-1 mt-1">
-                    <Flame size={12} fill="currentColor"/> 🔥 {streakInfo} วันต่อเนื่อง!
-                  </span>
-                )}
-              </div>
-            </div>
-            <button onClick={() => setView('login')} className="text-slate-300 hover:text-rose-500 transition-colors"><LogOut size={24}/></button>
-          </nav>
-
-          <main className="max-w-6xl mx-auto p-4 md:p-8 space-y-6">
-
-            {/* แจ้งเตือนงานค้าง */}
-            {missingSubmissions.length > 0 ? (
-                <div className="bg-rose-50 border border-rose-100 p-6 rounded-[2rem] flex flex-col md:flex-row items-center gap-4 shadow-sm animate-pulse-slow">
-                    <div className="bg-rose-100 p-3 rounded-2xl text-rose-600"><Calendar size={32} /></div>
-                    <div>
-                        <h3 className="text-rose-900 font-black text-lg uppercase tracking-tight">ตรวจพบงานค้างส่ง {missingSubmissions.length} รายการ</h3>
-                        <p className="text-rose-600 text-sm font-bold opacity-80">วันที่ขาด (จ.-ศ.): {missingSubmissions.map(m => m.label).join(', ')}</p>
-                    </div>
-                </div>
-            ) : (
-              <div className="bg-emerald-50 border border-emerald-100 p-6 rounded-[2rem] flex items-center gap-4 shadow-sm">
-                  <div className="bg-emerald-100 p-3 rounded-2xl text-emerald-600"><CheckCircle2 size={32} /></div>
-                  <div>
-                      <h3 className="text-emerald-900 font-black text-lg uppercase tracking-tight">ยอดเยี่ยม! ส่งงานครบถ้วนแล้ว</h3>
-                      <p className="text-emerald-600 text-sm font-bold opacity-80">คุณบันทึกคะแนนครบทุกวันตั้งแต่เริ่มบันทึก ({activeStudent?.startDate})</p>
-                  </div>
-              </div>
-            )}
-            
-            {/* 1. Badge & Mission Section */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 bg-white p-6 rounded-[2.5rem] shadow-sm border border-slate-100">
-                <div className="flex justify-between items-center mb-6">
-                  <h2 className="font-black text-xl flex items-center gap-2"><Star className="text-amber-400" fill="currentColor"/> หอเกียรติยศ</h2>
-                  <span className="text-[10px] font-black text-slate-400 uppercase">Badges: {badges.length}/5</span>
-                </div>
-                <div className="grid grid-cols-5 gap-2 md:gap-4">
-                  {['first', 'streak5', 'king', 'flyer', 'perfect'].map(badgeId => {
-                    const earned = badges.find(b => b.id === badgeId);
-                    return (
-                      <div key={badgeId} className={`flex flex-col items-center p-2 rounded-2xl transition-all ${earned ? 'bg-slate-50' : 'opacity-20 grayscale'}`}>
-                        <div className="w-12 h-12 md:w-16 md:h-16 rounded-full bg-white shadow-sm flex items-center justify-center mb-2">
-                           {badgeId === 'first' && <Medal size={24} className="text-amber-600"/>}
-                           {badgeId === 'streak5' && <Flame size={24} className="text-orange-500"/>}
-                           {badgeId === 'king' && <Award size={24} className="text-amber-400"/>}
-                           {badgeId === 'flyer' && <Rocket size={24} className="text-indigo-500"/>}
-                           {badgeId === 'perfect' && <Crown size={24} className="text-yellow-500"/>}
+        // --- Sub-Components ---
+        const LoginPage = ({ loginForm, setLoginForm, handleLogin, error }) => (
+            <div className="min-h-screen flex items-center justify-center bg-indigo-50 p-4 relative overflow-hidden">
+                <div className="w-full max-w-md bg-white rounded-[3rem] shadow-2xl p-10 border border-white z-10">
+                    <div className="text-center mb-10">
+                        <div className="bg-indigo-600 w-24 h-24 rounded-[2rem] flex items-center justify-center mx-auto mb-6 shadow-2xl text-white">
+                            <Icon name="award" size={48} />
                         </div>
-                        <span className="text-[8px] md:text-[10px] font-black text-center leading-tight">{earned ? earned.title : '???'}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="bg-indigo-900 p-6 rounded-[2.5rem] text-white shadow-xl relative overflow-hidden">
-                <div className="relative z-10">
-                  <h3 className="font-black text-lg mb-2 flex items-center gap-2 text-indigo-200"><Target size={18}/> ภารกิจถัดไป</h3>
-                  {badges.length < 5 ? (
-                    <div>
-                      <p className="text-sm font-bold mb-4 text-indigo-100">บันทึกคะแนนสะสมให้ครบ 20 วัน เพื่อรับเหรียญทอง!</p>
-                      <div className="w-full bg-indigo-800 h-3 rounded-full overflow-hidden">
-                        <div 
-                          className="h-full bg-indigo-400 shadow-[0_0_10px_rgba(129,140,248,0.5)] transition-all duration-1000" 
-                          style={{ width: `${Math.min((statsValues.t / 20) * 100, 100)}%` }}
-                        ></div>
-                      </div>
-                      <p className="text-[10px] font-black mt-2 text-right opacity-60">{statsValues.t}/20 วัน</p>
+                        <h1 className="text-3xl font-black text-slate-800 tracking-tight">Homework Tracker</h1>
+                        <p className="text-slate-400 font-bold mt-2 text-sm uppercase tracking-widest">ระบบบันทึกคะแนน</p>
                     </div>
-                  ) : (
-                    <div className="text-center py-4">
-                      <Crown size={48} className="mx-auto text-yellow-400 mb-2 animate-bounce"/>
-                      <p className="font-black">เจ้าคือสุดยอดปรมาจารย์!</p>
-                      <p className="text-xs opacity-70">สะสมเหรียญรางวัลครบทุกแบบแล้ว</p>
-                    </div>
-                  )}
+                    <form onSubmit={handleLogin} className="space-y-6">
+                        <input 
+                            type="text" 
+                            className="w-full p-4 bg-slate-50 border-2 border-transparent focus:border-indigo-500 rounded-2xl outline-none font-bold" 
+                            placeholder="Username" 
+                            value={loginForm.username} 
+                            onChange={(e) => setLoginForm({...loginForm, username: e.target.value})} 
+                        />
+                        <input 
+                            type="password" 
+                            className="w-full p-4 bg-slate-50 border-2 border-transparent focus:border-indigo-500 rounded-2xl outline-none font-bold" 
+                            placeholder="Password (วันเกิด)" 
+                            value={loginForm.password} 
+                            onChange={(e) => setLoginForm({...loginForm, password: e.target.value})} 
+                        />
+                        {error && (
+                            <div className="bg-red-50 p-4 rounded-xl border border-red-100">
+                                <p className="text-red-600 text-[11px] font-bold text-center leading-relaxed whitespace-pre-wrap">{error}</p>
+                            </div>
+                        )}
+                        <button type="submit" className="w-full bg-indigo-600 text-white font-black py-5 rounded-2xl shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2">
+                            เข้าสู่ระบบ <Icon name="chevronRight" size={24} />
+                        </button>
+                    </form>
                 </div>
-                <div className="absolute -bottom-10 -right-10 w-40 h-40 bg-white/5 rounded-full blur-3xl"></div>
-              </div>
+                <div className="absolute bottom-8 right-10 text-slate-500 text-right z-20 pointer-events-none select-none">
+                    <p className="text-lg font-black leading-none">สร้างโดย KF</p>
+                    <p className="text-sm font-bold opacity-70 mt-1">Line ID: prawitf</p>
+                </div>
             </div>
+        );
 
-            {/* 2. Stats Grid */}
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-              <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100"><p className="text-[10px] font-black text-slate-400 uppercase mb-2">เฉลี่ยรวม</p><span className={`text-4xl font-black text-${SETTINGS.themeColor}-600`}>{statsValues.a}</span></div>
-              <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100"><p className="text-[10px] font-black text-slate-400 uppercase mb-2">ความขยัน</p><span className="text-4xl font-black text-slate-800">{statsValues.t} <small className="text-xs text-slate-300">ครั้ง</small></span></div>
-              <div className={`bg-${SETTINGS.themeColor}-600 p-6 rounded-[2rem] text-white col-span-2 lg:col-span-1 flex justify-between items-center shadow-xl`}>
-                <div><p className="text-[10px] font-black opacity-60 uppercase mb-2">สูงสุด</p><span className="text-4xl font-black">{statsValues.m}</span></div>
-                <TrendingUp size={40} className="opacity-30"/>
-              </div>
-            </div>
-
-            {/* 3. Chart Section */}
-            <div className="bg-white p-6 md:p-10 rounded-[2.5rem] shadow-sm border border-slate-100">
-              <h2 className="font-black text-xl mb-8 flex justify-between items-center">
-                <span>เส้นทางพัฒนาการ</span>
-                <span className="text-xs font-bold text-slate-300 uppercase tracking-widest">Performance</span>
-              </h2>
-              <div className="h-[250px] w-full">
-                {chartData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={chartData}>
-                      <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4f46e5" stopOpacity={0.2}/><stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/></linearGradient></defs>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                      <XAxis dataKey="d" axisLine={false} tickLine={false} tick={{fontSize:11, fontWeight:800, fill:'#94a3b8'}} />
-                      <YAxis domain={[0, 200]} axisLine={false} tickLine={false} tick={{fontSize:10, fill:'#cbd5e1'}} />
-                      <Tooltip contentStyle={{borderRadius:'1.5rem', border:'none', boxShadow:'0 20px 25px -5px rgb(0 0 0 / 0.1)'}} />
-                      <Area type="monotone" dataKey="v" stroke="#4f46e5" strokeWidth={5} fill="url(#g)" />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                ) : <div className="h-full flex items-center justify-center text-slate-200 italic font-bold">เริ่มบันทึกคะแนนเพื่อดูพัฒนาการ</div>}
-              </div>
-            </div>
-
-            {/* 4. Action & History Section */}
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-              <div className="lg:col-span-2 bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
-                <h2 className="font-black text-lg mb-6 flex items-center gap-2 text-slate-800">
-                  <Calendar size={20} className={`text-${SETTINGS.themeColor}-600`}/> 
-                  {editingScoreId ? "แก้ไขข้อมูล" : "จดคะแนนวันนี้"}
-                </h2>
-                <form onSubmit={handleSaveOrUpdateScore} className="space-y-4">
-                  <input type="date" className="w-full p-4 bg-slate-50 rounded-xl font-bold outline-none border border-transparent focus:border-indigo-500 transition-all" value={inputScoreDate} onChange={(e)=>setInputScoreDate(e.target.value)} />
-                  <div className="relative">
-                    <input type="number" step="0.1" className={`w-full p-6 bg-indigo-50 rounded-2xl text-5xl font-black text-center text-${SETTINGS.themeColor}-600 outline-none`} placeholder="0.0" value={inputScoreVal} onChange={(e)=>setInputScoreVal(e.target.value)} />
-                    <span className="absolute bottom-2 right-4 text-[10px] font-black text-indigo-300 uppercase">Points</span>
-                  </div>
-                  <input type="text" className="w-full p-4 bg-slate-50 rounded-xl font-bold text-sm outline-none border border-transparent focus:border-indigo-500 transition-all" placeholder="จดบันทึกวิชาหรือสิ่งที่เรียน..." value={inputScoreNote} onChange={(e)=>setInputScoreNote(e.target.value)} />
-                  {statusOk && <p className="text-emerald-500 text-center font-bold text-xs bg-emerald-50 p-3 rounded-xl border border-emerald-100">{statusOk}</p>}
-                  <div className="flex gap-2 pt-2">
-                    <button disabled={isWorking || !isReady} className="flex-1 bg-slate-900 text-white py-5 rounded-2xl font-black shadow-xl active:scale-95 transition-all disabled:opacity-50">
-                      {isWorking ? "กำลังประมวลผล..." : (editingScoreId ? "อัปเดต" : "บันทึกคะแนน")}
+        const TeacherSettings = ({ students, success, error, newStudent, setNewStudent, handleAddStudent, bulkInput, setBulkInput, handleBulkImport, handleDeleteStudent, handleLogout, loading }) => (
+            <div className="min-h-screen bg-slate-50">
+                <nav className="bg-white border-b border-gray-100 px-8 py-5 flex justify-between items-center shadow-sm sticky top-0 z-50">
+                    <div className="flex items-center gap-3 text-indigo-600 font-black text-xl">
+                        <Icon name="settings" size={28} /> <span>Teacher Dashboard</span>
+                    </div>
+                    <button onClick={handleLogout} className="text-slate-400 hover:text-red-500 font-bold flex items-center gap-2 transition-colors">
+                        <Icon name="logout" size={22} /> ออกจากระบบ
                     </button>
-                    {editingScoreId && (
-                      <button type="button" onClick={() => { setEditingScoreId(null); setInputScoreVal(''); setInputScoreNote(''); }} className="bg-slate-100 text-slate-500 px-6 rounded-2xl font-black"><X size={20}/></button>
-                    )}
-                  </div>
-                </form>
-              </div>
+                </nav>
+                <main className="max-w-6xl mx-auto p-6 md:py-10 grid grid-cols-1 md:grid-cols-12 gap-10">
+                    <div className="md:col-span-4 space-y-8">
+                        <div className="bg-white rounded-[2.5rem] p-8 border border-slate-100 shadow-sm">
+                            <div className="flex items-center gap-3 mb-6 bg-slate-50 p-3 rounded-2xl">
+                                <div className="p-2 bg-amber-100 rounded-xl flex items-center justify-center w-10 h-10">
+                                    <Icon name="star" size={22} className="text-amber-500" />
+                                </div>
+                                <h2 className="text-lg font-black text-slate-800">ลงทะเบียนรายคน</h2>
+                            </div>
+                            <form onSubmit={handleAddStudent} className="space-y-4">
+                                <input className="w-full p-4 bg-slate-50 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 font-bold" placeholder="ชื่อเล่านักเรียน" value={newStudent.name} onChange={(e) => setNewStudent({...newStudent, name: e.target.value})} />
+                                <input className="w-full p-4 bg-slate-50 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 font-bold" placeholder="รหัสผ่าน (เช่น วันเกิด)" value={newStudent.dob} onChange={(e) => setNewStudent({...newStudent, dob: e.target.value})} />
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">วันที่เริ่มบันทึก</label>
+                                    <input type="date" className="w-full p-4 bg-slate-50 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 font-bold" value={newStudent.startDate} onChange={(e) => setNewStudent({...newStudent, startDate: e.target.value})} />
+                                </div>
+                                {error && <p className="text-red-500 text-xs font-bold px-2">{error}</p>}
+                                <button disabled={loading} className="w-full bg-slate-900 text-white py-4 rounded-xl font-black shadow-lg disabled:opacity-50 transition-all">
+                                    {loading ? 'กำลังบันทึก...' : 'บันทึกรายคน'}
+                                </button>
+                            </form>
+                        </div>
+                        <div className="bg-indigo-50 rounded-[2.5rem] p-8 border border-indigo-100">
+                            <h3 className="font-black text-indigo-900 mb-2 flex items-center gap-2"><Icon name="clipboard" size={20}/> นำเข้าจาก Excel</h3>
+                            <textarea className="w-full h-32 p-3 bg-white rounded-xl outline-none text-xs mb-3 font-mono custom-scrollbar" placeholder="คัดลอก ชื่อ [Tab] รหัส [Tab] วันที่ จาก Excel..." value={bulkInput} onChange={(e)=>setBulkInput(e.target.value)}></textarea>
+                            <button disabled={loading} onClick={handleBulkImport} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold shadow-md disabled:opacity-50">นำเข้าข้อมูลชุดใหญ่</button>
+                        </div>
+                    </div>
+                    <div className="md:col-span-8 bg-white rounded-[2.5rem] shadow-sm border border-slate-100 overflow-hidden flex flex-col h-full">
+                        <div className="px-8 py-6 bg-slate-50/50 border-b border-slate-100 flex justify-between shrink-0">
+                            <h2 className="font-black text-slate-800">รายชื่อนักเรียน ({students.length})</h2>
+                            {success && <span className="text-emerald-500 font-black animate-pulse">{success}</span>}
+                        </div>
+                        <div className="divide-y divide-slate-50 overflow-y-auto custom-scrollbar">
+                            {students.length === 0 ? (
+                                <div className="p-20 text-center text-slate-300 font-bold italic">ยังไม่มีข้อมูลนักเรียน</div>
+                            ) : (
+                                students.sort((a,b)=>a.name.localeCompare(b.name)).map(s => (
+                                    <div key={s.id} className="px-8 py-5 flex items-center justify-between hover:bg-slate-50 transition-all">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600 font-black text-xl uppercase">{s.name ? s.name.charAt(0) : '?'}</div>
+                                            <div>
+                                                <p className="font-black text-slate-800 text-lg">{s.name}</p>
+                                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Pass: {s.dob} | Start: {s.startDate}</p>
+                                            </div>
+                                        </div>
+                                        <button onClick={() => handleDeleteStudent(s.id)} className="text-slate-200 hover:text-red-500 p-2 transition-colors"><Icon name="trash" size={22} /></button>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </main>
+            </div>
+        );
 
-              <div className="lg:col-span-3 bg-white rounded-[2.5rem] shadow-sm border border-slate-100 flex flex-col h-[500px]">
-                <div className="p-8 border-b border-slate-50 font-black flex justify-between items-center text-slate-800">
-                  <span>ประวัติคะแนน</span>
-                  <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">History</span>
-                </div>
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
-                  {studentScores.map(s => (
-                    <div key={s.id} className="m-2 p-4 flex justify-between items-center border border-transparent hover:border-slate-100 hover:bg-slate-50 rounded-2xl group transition-all">
-                      <div className="flex gap-4 items-center">
-                        <div className="w-12 h-12 bg-white shadow-sm rounded-xl flex flex-col items-center justify-center border border-slate-100">
-                          <span className="text-lg font-black leading-none text-slate-700">{new Date(s.date).getDate()}</span>
-                          <span className={`text-[8px] font-bold text-${SETTINGS.themeColor}-600 uppercase`}>{new Date(s.date).toLocaleDateString('th-TH', {month:'short'})}</span>
+        const ParentDashboard = ({ loggedInStudent, streakCount, missingDates, badgesEarned, stats, chartData, newScore, setNewScore, handleAddScore, myScores, handleLogout, success, loading }) => (
+            <div className="min-h-screen">
+                <nav className="bg-white border-b border-gray-100 px-8 py-6 flex justify-between items-center shadow-sm sticky top-0 z-50">
+                    <div className="flex items-center gap-4">
+                        <div className="bg-indigo-600 w-14 h-14 rounded-[1.5rem] flex items-center justify-center text-white shadow-xl shadow-indigo-100">
+                            <Icon name="award" size={32} />
                         </div>
                         <div>
-                          <p className="font-bold text-slate-700 text-sm line-clamp-1">{s.note || 'ไม่มีหมายเหตุ'}</p>
-                          <div className="flex gap-4 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button onClick={() => { setEditingScoreId(s.id); setInputScoreDate(s.date); setInputScoreVal(s.score); setInputScoreNote(s.note || ''); window.scrollTo({top:0, behavior:'smooth'}); }} className="text-indigo-500 text-[10px] font-bold flex items-center gap-1 hover:underline"><Edit2 size={10}/> แก้ไข</button>
-                            <button onClick={async () => { if(window.confirm('ลบคะแนนนี้?')) await deleteDoc(doc(db,'artifacts',appId,'public','data','scores',s.id)); }} className="text-rose-400 text-[10px] font-bold flex items-center gap-1 hover:underline"><Trash2 size={10}/> ลบ</button>
-                          </div>
+                            <h1 className="font-black text-2xl text-slate-800 leading-none">{loggedInStudent?.name}</h1>
+                            {streakCount > 0 && <span className="text-orange-500 text-[10px] font-black flex items-center gap-1 mt-2 uppercase tracking-widest"><Icon name="flame" size={14} className="fill-current"/> {streakCount} วันต่อเนื่อง!</span>}
                         </div>
-                      </div>
-                      <div className="text-right">
-                        <span className={`text-2xl font-black text-${SETTINGS.themeColor}-600`}>{s.score}</span>
-                      </div>
                     </div>
-                  ))}
-                  {studentScores.length === 0 && <div className="p-20 text-center text-slate-300 italic font-bold">ยังไม่พบประวัติการจดคะแนน</div>}
+                    <button onClick={handleLogout} className="text-slate-300 hover:text-red-500 transition-colors"><Icon name="logout" size={36} /></button>
+                </nav>
+                <main className="max-w-6xl mx-auto p-6 md:py-10 space-y-8">
+                    {missingDates.length > 0 ? (
+                        <div className="bg-rose-50 border border-rose-100 p-8 rounded-[3rem] flex items-center gap-5 shadow-sm animate-pulse-slow">
+                            <div className="bg-rose-100 p-4 rounded-3xl text-rose-600 flex items-center justify-center">
+                                <Icon name="calendar" size={40} />
+                            </div>
+                            <div>
+                                <h3 className="text-rose-900 font-black text-xl uppercase tracking-tight mb-1">ตรวจพบงานค้างส่ง {missingDates.length} รายการ</h3>
+                                <p className="text-rose-600 text-sm font-bold opacity-80">วันที่ขาด: {missingDates.join(', ')}</p>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="bg-emerald-50 border border-emerald-100 p-8 rounded-[3rem] flex items-center gap-5 shadow-sm">
+                            <div className="bg-emerald-100 p-4 rounded-3xl text-emerald-600 flex items-center justify-center">
+                                <Icon name="checkCircle" size={40} />
+                            </div>
+                            <div>
+                                <h3 className="text-emerald-900 font-black text-xl uppercase tracking-tight mb-1">ยอดเยี่ยม! ส่งงานครบถ้วนแล้ว</h3>
+                                <p className="text-emerald-600 text-sm font-bold opacity-80">คุณบันทึกคะแนนครบทุกวันตั้งแต่วันเริ่มบันทึก ({loggedInStudent?.startDate})</p>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-2 bg-white p-8 rounded-[3rem] shadow-sm border border-slate-100">
+                            <div className="flex justify-between items-center mb-6">
+                                <h2 className="font-black text-xl flex items-center gap-2"><Icon name="star" size={24} className="text-amber-400" /> หอเกียรติยศ</h2>
+                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Badges: {badgesEarned.length}/5</span>
+                            </div>
+                            <div className="grid grid-cols-5 gap-4">
+                                {['first', 'streak5', 'king', 'flyer', 'perfect'].map(badgeId => {
+                                    const earned = badgesEarned.find(b => b.id === badgeId);
+                                    return (
+                                        <div key={badgeId} className={`flex flex-col items-center p-3 rounded-3xl transition-all ${earned ? 'bg-slate-50 scale-105' : 'opacity-10 grayscale'}`}>
+                                            <div className="w-12 h-12 md:w-20 md:h-20 rounded-full bg-white shadow-sm flex items-center justify-center mb-3">
+                                                {badgeId === 'first' && <Icon name="medal" size={32} className="text-amber-600"/>}
+                                                {badgeId === 'streak5' && <Icon name="flame" size={32} className="text-orange-500"/>}
+                                                {badgeId === 'king' && <Icon name="award" size={32} className="text-amber-400"/>}
+                                                {badgeId === 'flyer' && <Icon name="rocket" size={32} className="text-indigo-500"/>}
+                                                {badgeId === 'perfect' && <Icon name="crown" size={32} className="text-yellow-500"/>}
+                                            </div>
+                                            <span className="text-[8px] md:text-[10px] font-black text-center leading-tight">{earned?.title || '???'}</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                        <div className="bg-indigo-900 p-8 rounded-[3rem] text-white shadow-xl relative overflow-hidden flex flex-col justify-center">
+                            <div className="relative z-10">
+                                <h3 className="font-black text-lg mb-2 flex items-center gap-2 text-indigo-200"><Icon name="target" size={20}/> ภารกิจถัดไป</h3>
+                                {badgesEarned.length < 5 ? (
+                                    <div>
+                                        <p className="text-sm font-bold mb-4 text-indigo-100 line-clamp-2">บันทึกคะแนนสะสมให้ครบ 20 วัน เพื่อรับเหรียญทอง!</p>
+                                        <div className="w-full bg-indigo-800 h-3 rounded-full overflow-hidden">
+                                            <div className="h-full bg-indigo-400 transition-all duration-1000 shadow-[0_0_10px_rgba(129,140,248,0.5)]" style={{ width: `${Math.min((stats.total / 20) * 100, 100)}%` }}></div>
+                                        </div>
+                                        <p className="text-[10px] font-black mt-2 text-right opacity-60">{stats.total}/20 วัน</p>
+                                    </div>
+                                ) : (
+                                    <div className="text-center py-4">
+                                        <Icon name="crown" size={48} className="mx-auto text-yellow-400 mb-2 animate-bounce"/>
+                                        <p className="font-black">ปรมาจารย์การบ้าน!</p>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="absolute -bottom-10 -right-10 w-40 h-40 bg-white/5 rounded-full blur-3xl"></div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                        <div className="bg-white p-10 rounded-[2.5rem] shadow-sm border border-slate-100 flex flex-col justify-center">
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">เฉลี่ย</p>
+                            <div className="flex items-baseline gap-2"><span className="text-6xl font-black text-indigo-600 tracking-tighter">{stats.avg}</span></div>
+                        </div>
+                        <div className="bg-white p-10 rounded-[2.5rem] shadow-sm border border-slate-100 flex flex-col justify-center">
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">บันทึกแล้ว</p>
+                            <div className="flex items-baseline gap-2"><span className="text-6xl font-black text-slate-800 tracking-tighter">{stats.total}</span></div>
+                        </div>
+                        <div className="bg-indigo-600 p-10 rounded-[2.5rem] shadow-2xl flex justify-between items-center text-white col-span-2 md:col-span-1 shadow-indigo-100 shadow-xl">
+                            <div><p className="text-[10px] font-bold opacity-60 uppercase tracking-widest mb-4">สูงสุด</p><span className="text-6xl font-black tracking-tighter">{stats.max}</span></div>
+                            <Icon name="trending" size={56} className="opacity-30" />
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-10 rounded-[3.5rem] shadow-sm border border-slate-100">
+                        <h2 className="text-2xl font-black text-slate-800 tracking-tight mb-12 flex justify-between items-center">
+                            <span>พัฒนาการคะแนน</span>
+                            <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest px-4 py-2 bg-indigo-50 rounded-full">Score Progress</span>
+                        </h2>
+                        <div className="h-[350px] w-full">
+                            {chartData.length > 0 ? (
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={chartData}>
+                                        <defs><linearGradient id="scoreGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4f46e5" stopOpacity={0.2}/><stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/></linearGradient></defs>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#94a3b8', fontWeight: 800}} dy={10} />
+                                        <YAxis domain={[0, 'auto']} axisLine={false} tickLine={false} tick={{fontSize: 11, fill: '#cbd5e1'}} />
+                                        <Tooltip contentStyle={{ borderRadius: '2rem', border: 'none', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.1)' }} />
+                                        <Area type="monotone" dataKey="score" stroke="#4f46e5" strokeWidth={6} fill="url(#scoreGrad)" animationDuration={1500} />
+                                    </AreaChart>
+                                </ResponsiveContainer>
+                            ) : <div className="h-full flex flex-col items-center justify-center text-slate-200 font-black italic border-4 border-dashed border-slate-50 rounded-[3rem]">บันทึกคะแนนเพื่อดูกราฟ</div>}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-10">
+                        <div className="md:col-span-2 bg-white p-10 rounded-[3rem] shadow-sm border border-slate-100 h-full">
+                            <h2 className="text-2xl font-black text-slate-800 mb-10 flex items-center gap-4"><Icon name="calendar" size={32} className="text-indigo-600" /> บันทึกคะแนน</h2>
+                            <form onSubmit={handleAddScore} className="space-y-8">
+                                <input type="date" className="w-full p-4 bg-slate-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 font-black text-slate-700" value={newScore.date} onChange={(e) => setNewScore({...newScore, date: e.target.value})} />
+                                <div className="text-center">
+                                    <input type="number" step="0.1" className="w-full p-8 bg-indigo-50 rounded-[2.5rem] outline-none text-6xl font-black text-indigo-600 text-center" placeholder="0.0" value={newScore.score} onChange={(e) => setNewScore({...newScore, score: e.target.value})} />
+                                </div>
+                                <input type="text" className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold" placeholder="วิชา / หมายเหตุ" value={newScore.note} onChange={(e) => setNewScore({...newScore, note: e.target.value})} />
+                                {success && <div className="p-4 bg-emerald-50 text-emerald-600 rounded-2xl font-black text-center animate-pulse">{success}</div>}
+                                <button disabled={loading} className="w-full bg-slate-900 text-white py-6 rounded-[2rem] font-black text-2xl hover:bg-black transition-all active:scale-95 shadow-xl disabled:opacity-50">
+                                    {loading ? 'กำลังบันทึก...' : 'บันทึกคะแนน'}
+                                </button>
+                            </form>
+                        </div>
+                        <div className="md:col-span-3 bg-white rounded-[3.5rem] shadow-sm border border-slate-100 flex flex-col overflow-hidden min-h-[500px] h-full">
+                            <div className="px-10 py-8 border-b border-slate-50 font-black text-slate-800 flex justify-between items-center bg-slate-50/30 shrink-0">
+                                <span>ประวัติย้อนหลัง</span><span className="text-[10px] text-slate-400 uppercase tracking-widest">Scroll</span>
+                            </div>
+                            <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
+                                {myScores.length === 0 ? <div className="p-32 text-center text-slate-100 font-black italic text-2xl">ยังไม่มีประวัติคะแนน</div> :
+                                    [...myScores].reverse().map(s => (
+                                        <div key={s.id} className="p-8 rounded-[2.5rem] hover:bg-slate-50 transition-all flex justify-between items-center border border-transparent hover:border-slate-100 group">
+                                            <div className="flex gap-8 items-center">
+                                                <div className="bg-white shadow-xl shadow-slate-100 border border-slate-100 w-20 h-20 rounded-[1.75rem] flex flex-col items-center justify-center">
+                                                    <span className="text-3xl font-black text-slate-800 leading-none">{new Date(s.date).getDate()}</span>
+                                                    <span className="text-[10px] font-black uppercase text-indigo-500 mt-2 tracking-widest">{new Date(s.date).toLocaleDateString('th-TH', { month: 'short' })}</span>
+                                                </div>
+                                                <div><p className="text-slate-800 font-black text-xl line-clamp-1">{s.note || 'ไม่มีหมายเหตุ'}</p></div>
+                                            </div>
+                                            <span className="text-4xl font-black text-indigo-600 tracking-tighter">{s.score}</span>
+                                        </div>
+                                    ))
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </main>
+                <footer className="text-center py-16 text-slate-200 text-xs font-black uppercase tracking-[0.5em]">Real-time Tracking System</footer>
+            </div>
+        );
+
+        // --- Main App ---
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [view, setView] = useState('login'); 
+            const [loggedInStudent, setLoggedInStudent] = useState(null);
+            const [students, setStudents] = useState([]);
+            const [scores, setScores] = useState([]);
+            const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+            const [newStudent, setNewStudent] = useState({ name: '', dob: '', startDate: getLocalDateString() });
+            const [newScore, setNewScore] = useState({ date: getLocalDateString(), score: '', note: '' });
+            const [bulkInput, setBulkInput] = useState('');
+            const [error, setError] = useState('');
+            const [success, setSuccess] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            useEffect(() => {
+                const initAuth = async () => {
+                    try {
+                        // ป้องกันปัญหาเว้นวรรคใน API Key
+                        const cleanConfig = { ...firebaseConfig, apiKey: firebaseConfig.apiKey.trim() };
+                        
+                        if (!firebase.apps.length) {
+                            firebase.initializeApp(cleanConfig);
+                        }
+                        
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await firebase.auth().signInWithCustomToken(__initial_auth_token);
+                        } else {
+                            await firebase.auth().signInAnonymously();
+                        }
+                    } catch (err) { 
+                        console.error("Auth initialization error:", err);
+                        if (err.code === 'auth/api-key-not-valid') {
+                            setError("⚠️ API Key ไม่ถูกต้อง\nโปรดตรวจสอบการคัดลอก และดูว่ามีการตั้งค่า Restrictions ใน Google Cloud Console หรือไม่");
+                        } else if (err.code === 'auth/operation-not-allowed') {
+                            setError("⚠️ ยังไม่ได้เปิด Anonymous Auth ใน Firebase Console");
+                        } else {
+                            setError(`เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์\n(${err.message || err.code})`);
+                        }
+                    }
+                };
+                initAuth();
+                
+                const unsubscribe = firebase.auth().onAuthStateChanged((u) => setUser(u));
+                return () => unsubscribe();
+            }, []);
+
+            useEffect(() => {
+                if (!user || !firebase.apps.length) return;
+                
+                const db = firebase.firestore();
+                const studentsRef = db.collection('artifacts').doc(currentAppId).collection('public').doc('data').collection('students');
+                const unsubStudents = studentsRef.onSnapshot((snapshot) => {
+                    setStudents(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                }, (err) => {
+                    console.error("Sync error:", err);
+                    setError("ไม่มีสิทธิ์เข้าถึงฐานข้อมูล (ตรวจสอบ Firestore Rules)");
+                });
+
+                const scoresRef = db.collection('artifacts').doc(currentAppId).collection('public').doc('data').collection('scores');
+                const unsubScores = scoresRef.onSnapshot((snapshot) => {
+                    setScores(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                }, (err) => console.error("Scores sync error:", err));
+
+                return () => { unsubStudents(); unsubScores(); };
+            }, [user]);
+
+            const handleLogin = (e) => {
+                e.preventDefault();
+                setError('');
+                if (loginForm.username.toLowerCase() === 'admin' && loginForm.password === '1234') {
+                    setView('teacher_settings');
+                    return;
+                }
+                const student = students.find(s => 
+                    s.name && s.name.trim().toLowerCase() === loginForm.username.trim().toLowerCase() && 
+                    s.dob === loginForm.password
+                );
+                if (student) {
+                    setLoggedInStudent(student);
+                    setView('parent_dashboard');
+                } else {
+                    setError('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
+                }
+            };
+
+            const handleAddStudent = async (e) => {
+                e.preventDefault();
+                setError('');
+                if (!newStudent.name || !newStudent.dob) {
+                    setError('กรุณากรอกข้อมูลให้ครบถ้วน');
+                    return;
+                }
+
+                setLoading(true);
+                try {
+                    const db = firebase.firestore();
+                    const studentsRef = db.collection('artifacts').doc(currentAppId).collection('public').doc('data').collection('students');
+                    await studentsRef.add({ ...newStudent, createdAt: new Date().toISOString() });
+                    setNewStudent({ name: '', dob: '', startDate: getLocalDateString() });
+                    setSuccess('ลงทะเบียนสำเร็จ');
+                    setTimeout(() => setSuccess(''), 3000);
+                } catch (err) { 
+                    console.error("Add student error:", err);
+                    setError('ไม่สามารถบันทึกข้อมูลได้: ' + err.code);
+                } finally { 
+                    setLoading(false); 
+                }
+            };
+
+            const handleBulkImport = async () => {
+                if (!bulkInput.trim()) return;
+                setLoading(true);
+                setError('');
+                try {
+                    const db = firebase.firestore();
+                    const rows = bulkInput.trim().split('\n');
+                    for (const row of rows) {
+                        const cols = row.split('\t');
+                        if (cols.length >= 2) {
+                            await db.collection('artifacts').doc(currentAppId).collection('public').doc('data').collection('students').add({
+                                name: cols[0].trim(),
+                                dob: cols[1].trim(),
+                                startDate: cols[2]?.trim() || getLocalDateString(),
+                                createdAt: new Date().toISOString()
+                            });
+                        }
+                    }
+                    setBulkInput('');
+                    setSuccess('นำเข้าสำเร็จ');
+                    setTimeout(() => setSuccess(''), 3000);
+                } catch (err) { 
+                    setError('นำเข้าล้มเหลว');
+                } finally { 
+                    setLoading(false); 
+                }
+            };
+
+            const handleDeleteStudent = async (id) => {
+                if (!confirm('ยืนยันการลบนักเรียน?')) return;
+                try {
+                    const db = firebase.firestore();
+                    await db.collection('artifacts').doc(currentAppId).collection('public').doc('data').collection('students').doc(id).delete();
+                } catch (err) { setError('ลบข้อมูลไม่สำเร็จ'); }
+            };
+
+            const handleAddScore = async (e) => {
+                e.preventDefault();
+                if (!newScore.score || !loggedInStudent) return;
+                setLoading(true);
+                try {
+                    const db = firebase.firestore();
+                    const scoresRef = db.collection('artifacts').doc(currentAppId).collection('public').doc('data').collection('scores');
+                    await scoresRef.add({
+                        studentId: loggedInStudent.id,
+                        date: newScore.date,
+                        score: parseFloat(newScore.score),
+                        note: newScore.note,
+                        timestamp: new Date().toISOString()
+                    });
+                    setNewScore({ date: getLocalDateString(), score: '', note: '' });
+                    setSuccess('บันทึกสำเร็จ');
+                    setTimeout(() => setSuccess(''), 3000);
+                } catch (err) { 
+                    setError('ไม่สามารถบันทึกคะแนนได้'); 
+                } finally { 
+                    setLoading(false); 
+                }
+            };
+
+            const handleLogout = () => {
+                setView('login');
+                setLoggedInStudent(null);
+                setLoginForm({ username: '', password: '' });
+                setError('');
+                setSuccess('');
+            };
+
+            const myScores = useMemo(() => {
+                if (!loggedInStudent) return [];
+                return scores
+                    .filter(s => s.studentId === loggedInStudent.id)
+                    .sort((a, b) => new Date(a.date) - new Date(b.date));
+            }, [scores, loggedInStudent]);
+
+            const streakCount = useMemo(() => {
+                if (myScores.length === 0) return 0;
+                const dates = new Set(myScores.map(s => s.date));
+                let streak = 0;
+                let checkDate = new Date();
+                checkDate.setHours(0, 0, 0, 0);
+                // ข้ามวันหยุด
+                if (checkDate.getDay() === 0) checkDate.setDate(checkDate.getDate() - 2);
+                if (checkDate.getDay() === 6) checkDate.setDate(checkDate.getDate() - 1);
+                
+                while (true) {
+                    const ds = getLocalDateString(checkDate);
+                    if (dates.has(ds)) {
+                        streak++;
+                        checkDate.setDate(checkDate.getDate() - 1);
+                        if (checkDate.getDay() === 0) checkDate.setDate(checkDate.getDate() - 2);
+                        if (checkDate.getDay() === 6) checkDate.setDate(checkDate.getDate() - 1);
+                    } else {
+                        break;
+                    }
+                }
+                return streak;
+            }, [myScores]);
+
+            const badgesEarned = useMemo(() => {
+                const b = [];
+                const total = myScores.length;
+                const avg = total > 0 ? (myScores.reduce((acc, c) => acc + c.score, 0) / total) : 0;
+                if (total >= 1) b.push({ id: 'first', title: 'ก้าวแรก', icon: 'medal' });
+                if (streakCount >= 5) b.push({ id: 'streak5', title: '5 วันติด', icon: 'flame' });
+                if (total >= 20) b.push({ id: 'king', title: 'เจ้าแห่งวินัย', icon: 'award' });
+                if (total >= 3) {
+                    const last3 = myScores.slice(-3);
+                    if (last3.every(s => s.score > avg)) b.push({ id: 'flyer', title: 'ดาวรุ่ง', icon: 'rocket' });
+                }
+                if (total >= 5) {
+                    const last5 = myScores.slice(-5);
+                    const l5Avg = last5.reduce((acc, c) => acc + c.score, 0) / 5;
+                    if (l5Avg >= 80) b.push({ id: 'perfect', title: 'ไร้ที่ติ', icon: 'crown' });
+                }
+                return b;
+            }, [myScores, streakCount]);
+
+            const missingDates = useMemo(() => {
+                if (!loggedInStudent) return [];
+                const missing = [];
+                const yest = new Date(); yest.setDate(yest.getDate() - 1); yest.setHours(0,0,0,0);
+                const parts = loggedInStudent.startDate?.split('-') || [];
+                const start = parts.length === 3 ? new Date(parts[0], parts[1]-1, parts[2]) : new Date(yest.getTime() - 14*86400000);
+                start.setHours(0,0,0,0);
+                let check = new Date(yest);
+                while (check >= start) {
+                    const ds = getLocalDateString(check);
+                    if (!myScores.some(s => s.date === ds)) missing.push(check.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }));
+                    check.setDate(check.getDate() - 1);
+                    if (missing.length > 30) break;
+                }
+                return missing;
+            }, [myScores, loggedInStudent]);
+
+            const stats = useMemo(() => {
+                if (!loggedInStudent || myScores.length === 0) return { avg: "0.0", total: 0, max: 0 };
+                return {
+                    avg: (myScores.reduce((acc, c) => acc + c.score, 0) / myScores.length).toFixed(1),
+                    total: myScores.length,
+                    max: Math.max(...myScores.map(s => s.score))
+                };
+            }, [myScores, loggedInStudent]);
+
+            const chartDataArray = useMemo(() => {
+                return [...myScores].map(s => ({
+                    date: new Date(s.date).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }),
+                    score: s.score
+                }));
+            }, [myScores]);
+
+            return (
+                <div className="antialiased">
+                    {view === 'login' && (
+                        <LoginPage 
+                            loginForm={loginForm} 
+                            setLoginForm={setLoginForm} 
+                            handleLogin={handleLogin} 
+                            error={error} 
+                        />
+                    )}
+                    {view === 'teacher_settings' && (
+                        <TeacherSettings 
+                            students={students} 
+                            success={success} 
+                            error={error}
+                            newStudent={newStudent} 
+                            setNewStudent={setNewStudent} 
+                            handleAddStudent={handleAddStudent} 
+                            bulkInput={bulkInput} 
+                            setBulkInput={setBulkInput} 
+                            handleBulkImport={handleBulkImport} 
+                            handleDeleteStudent={handleDeleteStudent} 
+                            handleLogout={handleLogout} 
+                            loading={loading}
+                        />
+                    )}
+                    {view === 'parent_dashboard' && (
+                        <ParentDashboard 
+                            loggedInStudent={loggedInStudent} 
+                            streakCount={streakCount} 
+                            missingDates={missingDates} 
+                            badgesEarned={badgesEarned} 
+                            stats={stats} 
+                            chartData={chartDataArray} 
+                            newScore={newScore} 
+                            setNewScore={setNewScore} 
+                            handleAddScore={handleAddScore} 
+                            myScores={myScores} 
+                            handleLogout={handleLogout} 
+                            success={success} 
+                            loading={loading}
+                        />
+                    )}
                 </div>
-              </div>
-            </div>
-          </main>
-        </div>
-      )}
+            );
+        };
 
-      {/* VIEW: ADMIN */}
-      {view === 'admin' && (
-        <div className="min-h-screen">
-          <nav className="bg-white px-6 py-4 flex justify-between items-center shadow-sm sticky top-0 z-50">
-            <div className={`flex items-center gap-2 text-${SETTINGS.themeColor}-600`}>
-              <Settings size={24} /> <span className="font-black text-lg text-slate-800">โหมดคุณครู</span>
-            </div>
-            <button onClick={() => setView('login')} className="text-slate-400 font-bold text-sm flex items-center gap-1 hover:text-rose-500"><LogOut size={18} /> ออก</button>
-          </nav>
-          <main className="max-w-6xl mx-auto p-4 md:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-4 space-y-6">
-              {/* FIXED: แก้ไขไอคอนลงทะเบียนรายคนให้แสดงผลเต็มรูป */}
-              <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100 flex flex-col items-center">
-                <div className="w-full flex items-center gap-3 mb-6 bg-slate-50 p-3 rounded-2xl">
-                    <div className="flex-shrink-0 p-2 bg-amber-100 rounded-xl">
-                      <Star className="text-amber-500 fill-current" size={24} />
-                    </div>
-                    <h3 className="font-black text-slate-800 text-lg">ลงทะเบียนรายคน</h3>
-                </div>
-                <form onSubmit={saveNewStudent} className="w-full space-y-4">
-                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">ชื่อเล่นนักเรียน</label><input className="w-full p-4 bg-slate-50 rounded-xl outline-none border border-transparent focus:border-indigo-500 font-bold text-sm" placeholder="เช่น น้องเอ" value={inputName} onChange={(e)=>setInputName(e.target.value)} /></div>
-                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">รหัสผ่าน (วันเกิด)</label><input className="w-full p-4 bg-slate-50 rounded-xl outline-none border border-transparent focus:border-indigo-500 font-bold text-sm" placeholder="เช่น 010155" value={inputDob} onChange={(e)=>setInputDob(e.target.value)} /></div>
-                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">วันที่เริ่มบันทึก</label><input type="date" className="w-full p-4 bg-slate-50 rounded-xl outline-none border border-transparent focus:border-indigo-500 font-bold text-sm" value={inputStartDate} onChange={(e)=>setInputStartDate(e.target.value)} /></div>
-                  {statusOk && <p className="text-emerald-500 text-[10px] font-bold bg-emerald-50 p-2 rounded-lg">{statusOk}</p>}
-                  <button disabled={isWorking || !isReady} className="w-full bg-slate-900 text-white py-4 rounded-xl font-black text-sm active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50">
-                    {isWorking ? <Loader2 className="animate-spin" size={16}/> : "ลงทะเบียนนักเรียน"}
-                  </button>
-                </form>
-              </div>
-              <div className="bg-indigo-50 p-8 rounded-[2.5rem] border border-indigo-100">
-                <h3 className="font-black mb-1 flex items-center gap-2 text-indigo-900"><CheckCircle2 size={18}/> นำเข้าจาก Excel</h3>
-                <p className="text-[10px] text-indigo-400 font-bold mb-4 uppercase">ชื่อ [Tab] รหัส [Tab] วันที่</p>
-                <textarea className="w-full h-32 p-3 bg-white rounded-xl outline-none border border-indigo-100 font-mono text-xs mb-3 custom-scrollbar" placeholder="คัดลอกจาก Excel มาวางได้เลย..." value={bulkInput} onChange={(e)=>setBulkInput(e.target.value)}></textarea>
-                <button onClick={handleBulkImport} disabled={isWorking || !bulkInput.trim()} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold active:scale-95 disabled:opacity-50">{isWorking ? "กำลังประมวลผล..." : "นำเข้าข้อมูลชุดใหญ่"}</button>
-              </div>
-            </div>
-            <div className="lg:col-span-8 bg-white rounded-[2.5rem] shadow-sm border border-slate-100 overflow-hidden">
-              <div className="p-6 border-b border-slate-50 font-black flex justify-between items-center bg-slate-50/30 text-slate-800">
-                <span>รายชื่อนักเรียน ({students.length})</span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Start Date</span>
-              </div>
-              <div className="divide-y divide-slate-50 max-h-[600px] overflow-y-auto custom-scrollbar">
-                {students.sort((a,b)=>a.name.localeCompare(b.name)).map(s => (
-                  <div key={s.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-10 h-10 bg-${SETTINGS.themeColor}-50 rounded-xl flex items-center justify-center text-${SETTINGS.themeColor}-600 font-black shadow-sm uppercase`}>{s.name.charAt(0)}</div>
-                      <div><p className="font-bold text-sm text-slate-700">{s.name}</p><p className="text-[10px] text-slate-400">Pass: {s.dob}</p></div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className="text-[10px] font-black text-indigo-400 bg-indigo-50 px-2 py-1 rounded-lg">{s.startDate || '-'}</span>
-                      <button onClick={()=>{ if(window.confirm(`ลบ ${s.name}?`)) deleteDoc(doc(db,'artifacts',appId,'public','data','students',s.id)); }} className="p-2 text-slate-200 hover:text-rose-500 transition-colors"><Trash2 size={18}/></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </main>
-        </div>
-      )}
-
-    </div>
-  );
-};
-
-export default App;
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
